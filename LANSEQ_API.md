@@ -1,85 +1,71 @@
-# Lanseq API — access requests and validated integration
+# Lanseq API — provider integration
 
-Lanseq is an inference provider for open-weight models, with additional model SKUs and capacity being added based on demand. Qwen3.8-27B INT4 is the initial live SKU.
+Lanseq is a multi-model inference infrastructure provider for open-weight models.
 
-## Access status
+Production API:
 
-The endpoint below is a dedicated OpenCode validation gateway. It is not a generally available, self-service customer API:
+`https://api.lanseq.cloud/v1`
 
-`https://opencode.172.98.22.239.sslip.io/v1`
+API reference:
 
-A public customer-access rollout is pending independent credential provisioning and verification. There is no self-service API-key portal or billing dashboard.
+`https://api.lanseq.cloud/docs`
 
-## Request API access
+## Access
 
-Open an [access request in this repository](https://github.com/CHYYX/Bridge-ai/issues) with the title **Lanseq API access request**. Include the model, a brief non-sensitive workload description, and expected usage/concurrency.
+Lanseq uses controlled credential provisioning for provider, gateway, agent, and platform integrations. There is no public self-service key portal.
 
-Requests are reviewed manually by Lanseq. Submitting a request does not activate access or guarantee availability. Independent customer-key provisioning is not yet operationally verified. An approved customer must receive a separate bearer credential through an agreed private delivery method before using the service. The existing validation credential must not be shared with customers.
+Approved integrations receive an independent bearer credential through a private delivery channel. Credentials can be scoped, rotated, and revoked independently.
 
-Do not post API keys, passwords, private prompts, or customer data in public issues.
+Do not post API keys, private prompts, or customer data in public issues.
 
-## Initial SKU
+## Model capacity
 
-| Field | Value |
-| --- | --- |
-| Model ID | `qwen3.8-27b-int4` |
-| Display name | Qwen3.8-27B INT4 |
-| Underlying model | `alibaba/qwen3.8-27b` |
-| Input price | $0.25 per million tokens |
-| Cache-read price | $0.045 per million tokens |
-| Output price | $1.99 per million tokens |
-| Context window | 70,000 tokens |
-| Maximum output | 8,192 tokens |
-| Input/output modalities | Text only |
+Lanseq is not a single-model provider. Model capacity is provisioned and adjusted against production workload requirements, routing demand, and integration needs.
 
-Champion capabilities reported by the operator: tool calling, JSON/structured output, and reasoning. Additional models are not listed as live.
+`qwen3.8-27b-int4` is the initial qualification SKU used for the first public provider integrations. It is not the limit of the Lanseq model catalog or deployment capability.
 
-## Validated OpenCode integration
+Use an authenticated `GET /v1/models` request to discover the model IDs provisioned for a specific integration.
 
-The operator's completed validation used OpenCode **1.18.30** and the following configuration. The bearer credential was supplied through an environment variable, not embedded in the JSON.
+## Interface
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "lanseq": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Lanseq",
-      "options": {
-        "baseURL": "https://opencode.172.98.22.239.sslip.io/v1",
-        "apiKey": "{env:LANSEQ_OPENCODE_KEY}"
-      },
-      "models": {
-        "qwen3.8-27b-int4": {
-          "name": "Qwen3.8-27B INT4",
-          "limit": {
-            "context": 70000,
-            "output": 8192
-          }
-        }
-      }
-    }
-  }
-}
-```
+Lanseq exposes an OpenAI-compatible interface.
 
-Recorded results:
-- Unauthenticated `GET /v1/models`: HTTP 401.
-- Authenticated `GET /v1/models`: HTTP 200, listing `qwen3.8-27b-int4`.
-- OpenCode selected Qwen3.8-27B INT4 / Lanseq and returned executable Python code for a Fibonacci-function task.
+- Authentication: `Authorization: Bearer <LANSEQ_API_KEY>`
+- Models: `GET /v1/models`
+- Chat completions: `POST /v1/chat/completions`
+- Streaming: SSE
+- Tool calling: supported on qualified models
+- Structured output / JSON schema: supported on qualified models
+- Reasoning output: supported on qualified models
 
-These are historical operator-verified results, not a new live test or an uptime/SLA commitment.
+Capabilities can vary by model. Integrations should rely on the capability metadata and qualification results for the model being provisioned.
 
-## Reasoning controls and remaining verification
+## Qualification
 
-The successful OpenCode integration did not test a reasoning request-control field. No support is claimed here for `reasoning_effort`, `enable_thinking`, `thinking`, or a reasoning on/off toggle.
+The initial Lanseq provider qualification path has been exercised through OpenCode and Hermes-compatible workflows, including authenticated model discovery, normal chat completion, streaming, tool calling, and structured-output testing.
 
-The model's reasoning capability is distinct from caller control of reasoning. Do not infer an API control from that capability or from the successful coding task.
+Production partners can be issued a dedicated evaluation credential for independent qualification and canary traffic before production routing.
 
-Before general customer access:
-- Implement and verify independent bearer credentials, isolation, and revocation.
-- Confirm the customer endpoint and credential-delivery process.
-- Verify the reasoning controls actually exposed by that endpoint.
-- Verify customer-facing usage/cache accounting and billing before charging for usage.
+## Data use
 
-This document does not claim acceptance into models.dev or OpenCode Zen / Go.
+Lanseq does not use inference content to train models.
+
+Operational metadata may be processed for service delivery, reliability, security, abuse prevention, capacity management, billing, settlement, and applicable compliance obligations.
+
+## Integration surface
+
+Company / provider surface:
+
+`https://lanseq.cloud`
+
+Production API:
+
+`https://api.lanseq.cloud/v1`
+
+API reference:
+
+`https://api.lanseq.cloud/docs`
+
+Integration access:
+
+`https://lanseq.cloud/access`
