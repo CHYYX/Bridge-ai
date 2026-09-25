@@ -42,7 +42,7 @@ Capabilities can vary by model. Integrations should rely on the capability metad
 
 ## Qualification
 
-The initial Lanseq provider qualification path has been exercised through OpenCode and Hermes-compatible workflows, including authenticated model discovery, normal chat completion, streaming, tool calling, and structured-output testing.
+The Lanseq provider qualification path has been exercised through OpenCode, Hermes-compatible workflows, and the production public API, including authenticated model discovery, normal chat completion, streaming with final usage accounting, tool calling, reasoning control, and JSON-schema structured output.
 
 Production partners can be issued a dedicated evaluation credential for independent qualification and canary traffic before production routing.
 
@@ -69,3 +69,11 @@ API reference:
 Integration access:
 
 `https://lanseq.cloud/access`
+
+Privacy & Data Policy:
+
+`https://lanseq.cloud/privacy`
+
+Terms of Service:
+
+`https://lanseq.cloud/terms`
