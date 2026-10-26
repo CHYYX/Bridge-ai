@@ -1,6 +1,8 @@
 # Lanseq API — provider integration
 
-Lanseq is a multi-model inference infrastructure provider for open-weight models.
+Lanseq builds **Multi-Model Inference Infrastructure** for open-weight models. The product architecture includes **Real-time Inference**, **Batch Execution**, and **Preflight Intelligence** (in development).
+
+This document covers the real-time provider interface. Batch interfaces, model availability, completion windows, and commercial terms are confirmed separately per integration. Preflight is not a generally available API. See [Product architecture](./PRODUCT_ARCHITECTURE.md) for the role and scope of each component.
 
 Production API:
 
