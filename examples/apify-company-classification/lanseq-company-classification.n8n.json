@@ -1,0 +1,549 @@
+{
+  "name": "Lanseq — classify supplied company descriptions in batches",
+  "active": false,
+  "nodes": [
+    {
+      "id": "lanseq-1",
+      "name": "Manual start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-2",
+      "name": "Input and budget",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{json:{\n  executeModelCalls: false,\n  build: '0.1.3',\n  perRunCapUsd: 0.05,\n  totalCapUsd: 0.10,\n  labels: ['manufacturer','distributor','software provider'], fields: [],\n  records: [\n    {id:'synthetic-001', text:'Example Alpha manufactures stainless steel valves.'},\n    {id:'synthetic-002', text:'Example Beta develops accounting software.'}\n  ]\n}}];"
+      },
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-3",
+      "name": "Validate and plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "'use strict';\n// Pure adapter logic. No network, credentials, or model calls.\nconst TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED']);\nfunction fail(code) { throw new Error(code); }\nfunction text(value, max, code) {\n  if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value, 'utf8') > max) fail(code);\n  return value;\n}\nfunction plan(c) {\n  if (c.executeModelCalls !== true) fail('EXECUTION_DISABLED: read README, select credentials, review budget, then enable explicitly');\n  if (!Array.isArray(c.records) || c.records.length < 1 || c.records.length > 1000) fail('RECORD_LIMIT_1_TO_1000');\n  const labels = c.labels ?? [], fields = c.fields ?? [];\n  for (const [values, max] of [[labels, 20], [fields, 10]]) {\n    if (!Array.isArray(values) || values.length > max) fail('TASK_FIELDS');\n    values.forEach(v => text(v, 120, 'TASK_FIELD_BYTES'));\n    if (new Set(values).size !== values.length) fail('DUPLICATE_TASK_FIELD');\n  }\n  if (!labels.length && !fields.length) fail('EMPTY_TASK');\n  const seen = new Set();\n  const items = c.records.map((r) => {\n    // Deliberately explicit mapping: no accidental use of a personal profile or email.\n    const id = text(r.id, 100, 'ID_MUST_BE_UNIQUE_STRING_MAX_100_BYTES');\n    if (seen.has(id)) fail('DUPLICATE_ID');\n    seen.add(id);\n    return {id, text: text(r.text, 8000, 'TEXT_MISSING_OR_OVER_8000_BYTES')};\n  });\n  const cap = c.perRunCapUsd, total = c.totalCapUsd;\n  if (!Number.isFinite(cap) || cap <= 0 || !Number.isFinite(total) || total <= 0) fail('INVALID_BUDGET');\n  const chunks = [];\n  for (let i = 0; i < items.length; i += 20) chunks.push(items.slice(i, i + 20));\n  if (chunks.length * cap > total + 1e-9) fail('BUDGET_TOO_SMALL_FOR_ALL_RUN_CAPS');\n  if (typeof c.build !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(c.build)) fail('BUILD_REQUIRED');\n  return {chunks, labels, fields, perRunCapUsd: cap, totalCapUsd: total, build: c.build,\n    batchIndex: 0, reports: [], canContinue: true,\n    input: {items: chunks[0], labels, fields, includeSourceText: false}};\n}\nfunction responseBody(r) {\n  if (!r || !Number.isInteger(r.statusCode) || r.statusCode < 200 || r.statusCode >= 300) fail('HTTP_NOT_SUCCESSFUL: inspect execution; do not resubmit an uncertain POST');\n  return r.body;\n}\nfunction remember(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || !/^[a-zA-Z0-9]{5,80}$/.test(run.id ?? '') || !/^[a-zA-Z0-9]{5,80}$/.test(run.defaultDatasetId ?? '')) fail('RUN_RESPONSE_INVALID: inspect Apify Runs before any resubmission');\n  return {...s, runId: run.id, datasetId: run.defaultDatasetId, deadline: now + 300000, terminal: false};\n}\nfunction inspect(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || run.id !== s.runId || run.defaultDatasetId !== s.datasetId) fail('RUN_IDENTITY_MISMATCH');\n  if (typeof run.status !== 'string') fail('MISSING_RUN_STATUS');\n  if (!TERMINAL.has(run.status) && now > s.deadline) fail('POLL_DEADLINE: inspect saved runId; no automatic resubmission');\n  if (!TERMINAL.has(run.status) && !['READY','RUNNING','TIMING-OUT','ABORTING'].includes(run.status)) fail('UNKNOWN_RUN_STATUS');\n  return {...s, runStatus: run.status, terminal: TERMINAL.has(run.status)};\n}\nfunction reconcile(s, response) {\n  if (!s.terminal) fail('NONTERMINAL_DATASET_READ');\n  const rows = responseBody(response);\n  if (!Array.isArray(rows)) fail('DATASET_NOT_ARRAY');\n  const expected = new Set(s.input.items.map(x => x.id));\n  const byId = new Map();\n  const anomalies = [];\n  for (const row of rows) {\n    if (!row || !expected.has(row.id)) { anomalies.push('UNEXPECTED_OUTPUT_ID'); continue; }\n    if (byId.has(row.id)) { anomalies.push('DUPLICATE_OUTPUT_ID'); continue; }\n    byId.set(row.id, row);\n  }\n  const results = s.input.items.map(item => {\n    const row = byId.get(item.id);\n    if (!row) return {id: item.id, status: 'MISSING_OUTPUT', needsReview: true, semanticCorrectnessVerified: false, runId: s.runId};\n    // Keep the Actor's output. Structure validation is not semantic verification or payment evidence.\n    return {...row, id: item.id, runId: s.runId, semanticCorrectnessVerified: false};\n  });\n  const complete = s.runStatus === 'SUCCEEDED' && !anomalies.length && results.every(r => r.status === 'STRUCTURE_VALIDATED');\n  const report = {batchIndex: s.batchIndex, runId: s.runId, datasetId: s.datasetId,\n    runStatus: s.runStatus, complete, anomalies, results};\n  const reports = [...s.reports, report];\n  const batchIndex = s.batchIndex + 1;\n  const canContinue = complete && batchIndex < s.chunks.length;\n  return {...s, reports, batchIndex, canContinue,\n    input: canContinue ? {items: s.chunks[batchIndex], labels: s.labels, fields: s.fields, includeSourceText: false} : null};\n}\nfunction finish(s) {\n  const returned = s.reports.flatMap(r => r.results);\n  const notSubmitted = s.chunks.slice(s.batchIndex).flat().map(r => ({id: r.id, status: 'NOT_SUBMITTED_AFTER_STOP', needsReview: true, semanticCorrectnessVerified: false}));\n  const results = [...returned, ...notSubmitted];\n  return {status: s.reports.every(r => r.complete) && !notSubmitted.length ? 'COMPLETED_STRUCTURE_CHECK_ONLY' : 'STOPPED_REVIEW_REQUIRED',\n    submittedRuns: s.reports.length, inputRecords: s.chunks.flat().length,\n    structureValidated: results.filter(r => r.status === 'STRUCTURE_VALIDATED').length,\n    missing: results.filter(r => r.status === 'MISSING_OUTPUT').length,\n    notSubmitted: notSubmitted.length,\n    paidResults: null, semanticAccuracy: null, actualChargeUsd: null,\n    runCapSumUsd: s.reports.length * s.perRunCapUsd,\n    runs: s.reports.map(({results, ...report}) => report), results};\n}\n\nreturn [{json:plan($input.first().json),pairedItem:{item:0}}];"
+      },
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-4",
+      "name": "Current batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{json:$input.first().json,pairedItem:{item:0}}];"
+      },
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-5",
+      "name": "Start Actor once",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/naa8BJzWLGzmD1dQP/runs",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 75000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "build",
+              "value": "={{ $json.build }}"
+            },
+            {
+              "name": "memory",
+              "value": "128"
+            },
+            {
+              "name": "timeout",
+              "value": "180"
+            },
+            {
+              "name": "restartOnError",
+              "value": "false"
+            },
+            {
+              "name": "maxTotalChargeUsd",
+              "value": "={{ $json.perRunCapUsd }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.input }}"
+      },
+      "position": [
+        900,
+        300
+      ],
+      "retryOnFail": false,
+      "onError": "stopWorkflow",
+      "notesInFlow": true,
+      "notes": "Select your own Apify Header Auth credential. No automatic retry. Never paste credentials into URL or workflow JSON."
+    },
+    {
+      "id": "lanseq-6",
+      "name": "Remember run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "'use strict';\n// Pure adapter logic. No network, credentials, or model calls.\nconst TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED']);\nfunction fail(code) { throw new Error(code); }\nfunction text(value, max, code) {\n  if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value, 'utf8') > max) fail(code);\n  return value;\n}\nfunction plan(c) {\n  if (c.executeModelCalls !== true) fail('EXECUTION_DISABLED: read README, select credentials, review budget, then enable explicitly');\n  if (!Array.isArray(c.records) || c.records.length < 1 || c.records.length > 1000) fail('RECORD_LIMIT_1_TO_1000');\n  const labels = c.labels ?? [], fields = c.fields ?? [];\n  for (const [values, max] of [[labels, 20], [fields, 10]]) {\n    if (!Array.isArray(values) || values.length > max) fail('TASK_FIELDS');\n    values.forEach(v => text(v, 120, 'TASK_FIELD_BYTES'));\n    if (new Set(values).size !== values.length) fail('DUPLICATE_TASK_FIELD');\n  }\n  if (!labels.length && !fields.length) fail('EMPTY_TASK');\n  const seen = new Set();\n  const items = c.records.map((r) => {\n    // Deliberately explicit mapping: no accidental use of a personal profile or email.\n    const id = text(r.id, 100, 'ID_MUST_BE_UNIQUE_STRING_MAX_100_BYTES');\n    if (seen.has(id)) fail('DUPLICATE_ID');\n    seen.add(id);\n    return {id, text: text(r.text, 8000, 'TEXT_MISSING_OR_OVER_8000_BYTES')};\n  });\n  const cap = c.perRunCapUsd, total = c.totalCapUsd;\n  if (!Number.isFinite(cap) || cap <= 0 || !Number.isFinite(total) || total <= 0) fail('INVALID_BUDGET');\n  const chunks = [];\n  for (let i = 0; i < items.length; i += 20) chunks.push(items.slice(i, i + 20));\n  if (chunks.length * cap > total + 1e-9) fail('BUDGET_TOO_SMALL_FOR_ALL_RUN_CAPS');\n  if (typeof c.build !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(c.build)) fail('BUILD_REQUIRED');\n  return {chunks, labels, fields, perRunCapUsd: cap, totalCapUsd: total, build: c.build,\n    batchIndex: 0, reports: [], canContinue: true,\n    input: {items: chunks[0], labels, fields, includeSourceText: false}};\n}\nfunction responseBody(r) {\n  if (!r || !Number.isInteger(r.statusCode) || r.statusCode < 200 || r.statusCode >= 300) fail('HTTP_NOT_SUCCESSFUL: inspect execution; do not resubmit an uncertain POST');\n  return r.body;\n}\nfunction remember(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || !/^[a-zA-Z0-9]{5,80}$/.test(run.id ?? '') || !/^[a-zA-Z0-9]{5,80}$/.test(run.defaultDatasetId ?? '')) fail('RUN_RESPONSE_INVALID: inspect Apify Runs before any resubmission');\n  return {...s, runId: run.id, datasetId: run.defaultDatasetId, deadline: now + 300000, terminal: false};\n}\nfunction inspect(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || run.id !== s.runId || run.defaultDatasetId !== s.datasetId) fail('RUN_IDENTITY_MISMATCH');\n  if (typeof run.status !== 'string') fail('MISSING_RUN_STATUS');\n  if (!TERMINAL.has(run.status) && now > s.deadline) fail('POLL_DEADLINE: inspect saved runId; no automatic resubmission');\n  if (!TERMINAL.has(run.status) && !['READY','RUNNING','TIMING-OUT','ABORTING'].includes(run.status)) fail('UNKNOWN_RUN_STATUS');\n  return {...s, runStatus: run.status, terminal: TERMINAL.has(run.status)};\n}\nfunction reconcile(s, response) {\n  if (!s.terminal) fail('NONTERMINAL_DATASET_READ');\n  const rows = responseBody(response);\n  if (!Array.isArray(rows)) fail('DATASET_NOT_ARRAY');\n  const expected = new Set(s.input.items.map(x => x.id));\n  const byId = new Map();\n  const anomalies = [];\n  for (const row of rows) {\n    if (!row || !expected.has(row.id)) { anomalies.push('UNEXPECTED_OUTPUT_ID'); continue; }\n    if (byId.has(row.id)) { anomalies.push('DUPLICATE_OUTPUT_ID'); continue; }\n    byId.set(row.id, row);\n  }\n  const results = s.input.items.map(item => {\n    const row = byId.get(item.id);\n    if (!row) return {id: item.id, status: 'MISSING_OUTPUT', needsReview: true, semanticCorrectnessVerified: false, runId: s.runId};\n    // Keep the Actor's output. Structure validation is not semantic verification or payment evidence.\n    return {...row, id: item.id, runId: s.runId, semanticCorrectnessVerified: false};\n  });\n  const complete = s.runStatus === 'SUCCEEDED' && !anomalies.length && results.every(r => r.status === 'STRUCTURE_VALIDATED');\n  const report = {batchIndex: s.batchIndex, runId: s.runId, datasetId: s.datasetId,\n    runStatus: s.runStatus, complete, anomalies, results};\n  const reports = [...s.reports, report];\n  const batchIndex = s.batchIndex + 1;\n  const canContinue = complete && batchIndex < s.chunks.length;\n  return {...s, reports, batchIndex, canContinue,\n    input: canContinue ? {items: s.chunks[batchIndex], labels: s.labels, fields: s.fields, includeSourceText: false} : null};\n}\nfunction finish(s) {\n  const returned = s.reports.flatMap(r => r.results);\n  const notSubmitted = s.chunks.slice(s.batchIndex).flat().map(r => ({id: r.id, status: 'NOT_SUBMITTED_AFTER_STOP', needsReview: true, semanticCorrectnessVerified: false}));\n  const results = [...returned, ...notSubmitted];\n  return {status: s.reports.every(r => r.complete) && !notSubmitted.length ? 'COMPLETED_STRUCTURE_CHECK_ONLY' : 'STOPPED_REVIEW_REQUIRED',\n    submittedRuns: s.reports.length, inputRecords: s.chunks.flat().length,\n    structureValidated: results.filter(r => r.status === 'STRUCTURE_VALIDATED').length,\n    missing: results.filter(r => r.status === 'MISSING_OUTPUT').length,\n    notSubmitted: notSubmitted.length,\n    paidResults: null, semanticAccuracy: null, actualChargeUsd: null,\n    runCapSumUsd: s.reports.length * s.perRunCapUsd,\n    runs: s.reports.map(({results, ...report}) => report), results};\n}\n\nreturn [{json:remember($(\"Current batch\").item.json,$input.first().json),pairedItem:{item:0}}];"
+      },
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-7",
+      "name": "Poll context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{json:$input.first().json,pairedItem:{item:0}}];"
+      },
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-8",
+      "name": "Read run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://api.apify.com/v2/actor-runs/' + $json.runId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 75000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "position": [
+        1560,
+        300
+      ],
+      "retryOnFail": false,
+      "onError": "stopWorkflow",
+      "notesInFlow": true,
+      "notes": "Select your own Apify Header Auth credential. No automatic retry. Never paste credentials into URL or workflow JSON."
+    },
+    {
+      "id": "lanseq-9",
+      "name": "Inspect run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "'use strict';\n// Pure adapter logic. No network, credentials, or model calls.\nconst TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED']);\nfunction fail(code) { throw new Error(code); }\nfunction text(value, max, code) {\n  if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value, 'utf8') > max) fail(code);\n  return value;\n}\nfunction plan(c) {\n  if (c.executeModelCalls !== true) fail('EXECUTION_DISABLED: read README, select credentials, review budget, then enable explicitly');\n  if (!Array.isArray(c.records) || c.records.length < 1 || c.records.length > 1000) fail('RECORD_LIMIT_1_TO_1000');\n  const labels = c.labels ?? [], fields = c.fields ?? [];\n  for (const [values, max] of [[labels, 20], [fields, 10]]) {\n    if (!Array.isArray(values) || values.length > max) fail('TASK_FIELDS');\n    values.forEach(v => text(v, 120, 'TASK_FIELD_BYTES'));\n    if (new Set(values).size !== values.length) fail('DUPLICATE_TASK_FIELD');\n  }\n  if (!labels.length && !fields.length) fail('EMPTY_TASK');\n  const seen = new Set();\n  const items = c.records.map((r) => {\n    // Deliberately explicit mapping: no accidental use of a personal profile or email.\n    const id = text(r.id, 100, 'ID_MUST_BE_UNIQUE_STRING_MAX_100_BYTES');\n    if (seen.has(id)) fail('DUPLICATE_ID');\n    seen.add(id);\n    return {id, text: text(r.text, 8000, 'TEXT_MISSING_OR_OVER_8000_BYTES')};\n  });\n  const cap = c.perRunCapUsd, total = c.totalCapUsd;\n  if (!Number.isFinite(cap) || cap <= 0 || !Number.isFinite(total) || total <= 0) fail('INVALID_BUDGET');\n  const chunks = [];\n  for (let i = 0; i < items.length; i += 20) chunks.push(items.slice(i, i + 20));\n  if (chunks.length * cap > total + 1e-9) fail('BUDGET_TOO_SMALL_FOR_ALL_RUN_CAPS');\n  if (typeof c.build !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(c.build)) fail('BUILD_REQUIRED');\n  return {chunks, labels, fields, perRunCapUsd: cap, totalCapUsd: total, build: c.build,\n    batchIndex: 0, reports: [], canContinue: true,\n    input: {items: chunks[0], labels, fields, includeSourceText: false}};\n}\nfunction responseBody(r) {\n  if (!r || !Number.isInteger(r.statusCode) || r.statusCode < 200 || r.statusCode >= 300) fail('HTTP_NOT_SUCCESSFUL: inspect execution; do not resubmit an uncertain POST');\n  return r.body;\n}\nfunction remember(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || !/^[a-zA-Z0-9]{5,80}$/.test(run.id ?? '') || !/^[a-zA-Z0-9]{5,80}$/.test(run.defaultDatasetId ?? '')) fail('RUN_RESPONSE_INVALID: inspect Apify Runs before any resubmission');\n  return {...s, runId: run.id, datasetId: run.defaultDatasetId, deadline: now + 300000, terminal: false};\n}\nfunction inspect(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || run.id !== s.runId || run.defaultDatasetId !== s.datasetId) fail('RUN_IDENTITY_MISMATCH');\n  if (typeof run.status !== 'string') fail('MISSING_RUN_STATUS');\n  if (!TERMINAL.has(run.status) && now > s.deadline) fail('POLL_DEADLINE: inspect saved runId; no automatic resubmission');\n  if (!TERMINAL.has(run.status) && !['READY','RUNNING','TIMING-OUT','ABORTING'].includes(run.status)) fail('UNKNOWN_RUN_STATUS');\n  return {...s, runStatus: run.status, terminal: TERMINAL.has(run.status)};\n}\nfunction reconcile(s, response) {\n  if (!s.terminal) fail('NONTERMINAL_DATASET_READ');\n  const rows = responseBody(response);\n  if (!Array.isArray(rows)) fail('DATASET_NOT_ARRAY');\n  const expected = new Set(s.input.items.map(x => x.id));\n  const byId = new Map();\n  const anomalies = [];\n  for (const row of rows) {\n    if (!row || !expected.has(row.id)) { anomalies.push('UNEXPECTED_OUTPUT_ID'); continue; }\n    if (byId.has(row.id)) { anomalies.push('DUPLICATE_OUTPUT_ID'); continue; }\n    byId.set(row.id, row);\n  }\n  const results = s.input.items.map(item => {\n    const row = byId.get(item.id);\n    if (!row) return {id: item.id, status: 'MISSING_OUTPUT', needsReview: true, semanticCorrectnessVerified: false, runId: s.runId};\n    // Keep the Actor's output. Structure validation is not semantic verification or payment evidence.\n    return {...row, id: item.id, runId: s.runId, semanticCorrectnessVerified: false};\n  });\n  const complete = s.runStatus === 'SUCCEEDED' && !anomalies.length && results.every(r => r.status === 'STRUCTURE_VALIDATED');\n  const report = {batchIndex: s.batchIndex, runId: s.runId, datasetId: s.datasetId,\n    runStatus: s.runStatus, complete, anomalies, results};\n  const reports = [...s.reports, report];\n  const batchIndex = s.batchIndex + 1;\n  const canContinue = complete && batchIndex < s.chunks.length;\n  return {...s, reports, batchIndex, canContinue,\n    input: canContinue ? {items: s.chunks[batchIndex], labels: s.labels, fields: s.fields, includeSourceText: false} : null};\n}\nfunction finish(s) {\n  const returned = s.reports.flatMap(r => r.results);\n  const notSubmitted = s.chunks.slice(s.batchIndex).flat().map(r => ({id: r.id, status: 'NOT_SUBMITTED_AFTER_STOP', needsReview: true, semanticCorrectnessVerified: false}));\n  const results = [...returned, ...notSubmitted];\n  return {status: s.reports.every(r => r.complete) && !notSubmitted.length ? 'COMPLETED_STRUCTURE_CHECK_ONLY' : 'STOPPED_REVIEW_REQUIRED',\n    submittedRuns: s.reports.length, inputRecords: s.chunks.flat().length,\n    structureValidated: results.filter(r => r.status === 'STRUCTURE_VALIDATED').length,\n    missing: results.filter(r => r.status === 'MISSING_OUTPUT').length,\n    notSubmitted: notSubmitted.length,\n    paidResults: null, semanticAccuracy: null, actualChargeUsd: null,\n    runCapSumUsd: s.reports.length * s.perRunCapUsd,\n    runs: s.reports.map(({results, ...report}) => report), results};\n}\n\nreturn [{json:inspect($(\"Poll context\").item.json,$input.first().json),pairedItem:{item:0}}];"
+      },
+      "position": [
+        1780,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-10",
+      "name": "Run terminal",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Run terminal-true",
+              "leftValue": "={{ $json.terminal }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "position": [
+        2000,
+        300
+      ]
+    },
+    {
+      "id": "lanseq-11",
+      "name": "Wait 10 seconds",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "parameters": {
+        "amount": 10,
+        "unit": "seconds"
+      },
+      "position": [
+        2000,
+        540
+      ]
+    },
+    {
+      "id": "lanseq-12",
+      "name": "Read results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://api.apify.com/v2/datasets/' + $json.datasetId + '/items' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 75000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "format",
+              "value": "json"
+            },
+            {
+              "name": "clean",
+              "value": "false"
+            },
+            {
+              "name": "limit",
+              "value": "21"
+            }
+          ]
+        }
+      },
+      "position": [
+        2220,
+        240
+      ],
+      "retryOnFail": false,
+      "onError": "stopWorkflow",
+      "notesInFlow": true,
+      "notes": "Select your own Apify Header Auth credential. No automatic retry. Never paste credentials into URL or workflow JSON."
+    },
+    {
+      "id": "lanseq-13",
+      "name": "Reconcile batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "'use strict';\n// Pure adapter logic. No network, credentials, or model calls.\nconst TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED']);\nfunction fail(code) { throw new Error(code); }\nfunction text(value, max, code) {\n  if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value, 'utf8') > max) fail(code);\n  return value;\n}\nfunction plan(c) {\n  if (c.executeModelCalls !== true) fail('EXECUTION_DISABLED: read README, select credentials, review budget, then enable explicitly');\n  if (!Array.isArray(c.records) || c.records.length < 1 || c.records.length > 1000) fail('RECORD_LIMIT_1_TO_1000');\n  const labels = c.labels ?? [], fields = c.fields ?? [];\n  for (const [values, max] of [[labels, 20], [fields, 10]]) {\n    if (!Array.isArray(values) || values.length > max) fail('TASK_FIELDS');\n    values.forEach(v => text(v, 120, 'TASK_FIELD_BYTES'));\n    if (new Set(values).size !== values.length) fail('DUPLICATE_TASK_FIELD');\n  }\n  if (!labels.length && !fields.length) fail('EMPTY_TASK');\n  const seen = new Set();\n  const items = c.records.map((r) => {\n    // Deliberately explicit mapping: no accidental use of a personal profile or email.\n    const id = text(r.id, 100, 'ID_MUST_BE_UNIQUE_STRING_MAX_100_BYTES');\n    if (seen.has(id)) fail('DUPLICATE_ID');\n    seen.add(id);\n    return {id, text: text(r.text, 8000, 'TEXT_MISSING_OR_OVER_8000_BYTES')};\n  });\n  const cap = c.perRunCapUsd, total = c.totalCapUsd;\n  if (!Number.isFinite(cap) || cap <= 0 || !Number.isFinite(total) || total <= 0) fail('INVALID_BUDGET');\n  const chunks = [];\n  for (let i = 0; i < items.length; i += 20) chunks.push(items.slice(i, i + 20));\n  if (chunks.length * cap > total + 1e-9) fail('BUDGET_TOO_SMALL_FOR_ALL_RUN_CAPS');\n  if (typeof c.build !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(c.build)) fail('BUILD_REQUIRED');\n  return {chunks, labels, fields, perRunCapUsd: cap, totalCapUsd: total, build: c.build,\n    batchIndex: 0, reports: [], canContinue: true,\n    input: {items: chunks[0], labels, fields, includeSourceText: false}};\n}\nfunction responseBody(r) {\n  if (!r || !Number.isInteger(r.statusCode) || r.statusCode < 200 || r.statusCode >= 300) fail('HTTP_NOT_SUCCESSFUL: inspect execution; do not resubmit an uncertain POST');\n  return r.body;\n}\nfunction remember(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || !/^[a-zA-Z0-9]{5,80}$/.test(run.id ?? '') || !/^[a-zA-Z0-9]{5,80}$/.test(run.defaultDatasetId ?? '')) fail('RUN_RESPONSE_INVALID: inspect Apify Runs before any resubmission');\n  return {...s, runId: run.id, datasetId: run.defaultDatasetId, deadline: now + 300000, terminal: false};\n}\nfunction inspect(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || run.id !== s.runId || run.defaultDatasetId !== s.datasetId) fail('RUN_IDENTITY_MISMATCH');\n  if (typeof run.status !== 'string') fail('MISSING_RUN_STATUS');\n  if (!TERMINAL.has(run.status) && now > s.deadline) fail('POLL_DEADLINE: inspect saved runId; no automatic resubmission');\n  if (!TERMINAL.has(run.status) && !['READY','RUNNING','TIMING-OUT','ABORTING'].includes(run.status)) fail('UNKNOWN_RUN_STATUS');\n  return {...s, runStatus: run.status, terminal: TERMINAL.has(run.status)};\n}\nfunction reconcile(s, response) {\n  if (!s.terminal) fail('NONTERMINAL_DATASET_READ');\n  const rows = responseBody(response);\n  if (!Array.isArray(rows)) fail('DATASET_NOT_ARRAY');\n  const expected = new Set(s.input.items.map(x => x.id));\n  const byId = new Map();\n  const anomalies = [];\n  for (const row of rows) {\n    if (!row || !expected.has(row.id)) { anomalies.push('UNEXPECTED_OUTPUT_ID'); continue; }\n    if (byId.has(row.id)) { anomalies.push('DUPLICATE_OUTPUT_ID'); continue; }\n    byId.set(row.id, row);\n  }\n  const results = s.input.items.map(item => {\n    const row = byId.get(item.id);\n    if (!row) return {id: item.id, status: 'MISSING_OUTPUT', needsReview: true, semanticCorrectnessVerified: false, runId: s.runId};\n    // Keep the Actor's output. Structure validation is not semantic verification or payment evidence.\n    return {...row, id: item.id, runId: s.runId, semanticCorrectnessVerified: false};\n  });\n  const complete = s.runStatus === 'SUCCEEDED' && !anomalies.length && results.every(r => r.status === 'STRUCTURE_VALIDATED');\n  const report = {batchIndex: s.batchIndex, runId: s.runId, datasetId: s.datasetId,\n    runStatus: s.runStatus, complete, anomalies, results};\n  const reports = [...s.reports, report];\n  const batchIndex = s.batchIndex + 1;\n  const canContinue = complete && batchIndex < s.chunks.length;\n  return {...s, reports, batchIndex, canContinue,\n    input: canContinue ? {items: s.chunks[batchIndex], labels: s.labels, fields: s.fields, includeSourceText: false} : null};\n}\nfunction finish(s) {\n  const returned = s.reports.flatMap(r => r.results);\n  const notSubmitted = s.chunks.slice(s.batchIndex).flat().map(r => ({id: r.id, status: 'NOT_SUBMITTED_AFTER_STOP', needsReview: true, semanticCorrectnessVerified: false}));\n  const results = [...returned, ...notSubmitted];\n  return {status: s.reports.every(r => r.complete) && !notSubmitted.length ? 'COMPLETED_STRUCTURE_CHECK_ONLY' : 'STOPPED_REVIEW_REQUIRED',\n    submittedRuns: s.reports.length, inputRecords: s.chunks.flat().length,\n    structureValidated: results.filter(r => r.status === 'STRUCTURE_VALIDATED').length,\n    missing: results.filter(r => r.status === 'MISSING_OUTPUT').length,\n    notSubmitted: notSubmitted.length,\n    paidResults: null, semanticAccuracy: null, actualChargeUsd: null,\n    runCapSumUsd: s.reports.length * s.perRunCapUsd,\n    runs: s.reports.map(({results, ...report}) => report), results};\n}\n\nreturn [{json:reconcile($(\"Inspect run\").item.json,$input.first().json),pairedItem:{item:0}}];"
+      },
+      "position": [
+        2440,
+        240
+      ]
+    },
+    {
+      "id": "lanseq-14",
+      "name": "Continue batches",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Continue batches-true",
+              "leftValue": "={{ $json.canContinue }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "position": [
+        2660,
+        240
+      ]
+    },
+    {
+      "id": "lanseq-15",
+      "name": "Final report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "'use strict';\n// Pure adapter logic. No network, credentials, or model calls.\nconst TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED-OUT', 'ABORTED']);\nfunction fail(code) { throw new Error(code); }\nfunction text(value, max, code) {\n  if (typeof value !== 'string' || !value.trim() || Buffer.byteLength(value, 'utf8') > max) fail(code);\n  return value;\n}\nfunction plan(c) {\n  if (c.executeModelCalls !== true) fail('EXECUTION_DISABLED: read README, select credentials, review budget, then enable explicitly');\n  if (!Array.isArray(c.records) || c.records.length < 1 || c.records.length > 1000) fail('RECORD_LIMIT_1_TO_1000');\n  const labels = c.labels ?? [], fields = c.fields ?? [];\n  for (const [values, max] of [[labels, 20], [fields, 10]]) {\n    if (!Array.isArray(values) || values.length > max) fail('TASK_FIELDS');\n    values.forEach(v => text(v, 120, 'TASK_FIELD_BYTES'));\n    if (new Set(values).size !== values.length) fail('DUPLICATE_TASK_FIELD');\n  }\n  if (!labels.length && !fields.length) fail('EMPTY_TASK');\n  const seen = new Set();\n  const items = c.records.map((r) => {\n    // Deliberately explicit mapping: no accidental use of a personal profile or email.\n    const id = text(r.id, 100, 'ID_MUST_BE_UNIQUE_STRING_MAX_100_BYTES');\n    if (seen.has(id)) fail('DUPLICATE_ID');\n    seen.add(id);\n    return {id, text: text(r.text, 8000, 'TEXT_MISSING_OR_OVER_8000_BYTES')};\n  });\n  const cap = c.perRunCapUsd, total = c.totalCapUsd;\n  if (!Number.isFinite(cap) || cap <= 0 || !Number.isFinite(total) || total <= 0) fail('INVALID_BUDGET');\n  const chunks = [];\n  for (let i = 0; i < items.length; i += 20) chunks.push(items.slice(i, i + 20));\n  if (chunks.length * cap > total + 1e-9) fail('BUDGET_TOO_SMALL_FOR_ALL_RUN_CAPS');\n  if (typeof c.build !== 'string' || !/^[a-zA-Z0-9._-]{1,80}$/.test(c.build)) fail('BUILD_REQUIRED');\n  return {chunks, labels, fields, perRunCapUsd: cap, totalCapUsd: total, build: c.build,\n    batchIndex: 0, reports: [], canContinue: true,\n    input: {items: chunks[0], labels, fields, includeSourceText: false}};\n}\nfunction responseBody(r) {\n  if (!r || !Number.isInteger(r.statusCode) || r.statusCode < 200 || r.statusCode >= 300) fail('HTTP_NOT_SUCCESSFUL: inspect execution; do not resubmit an uncertain POST');\n  return r.body;\n}\nfunction remember(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || !/^[a-zA-Z0-9]{5,80}$/.test(run.id ?? '') || !/^[a-zA-Z0-9]{5,80}$/.test(run.defaultDatasetId ?? '')) fail('RUN_RESPONSE_INVALID: inspect Apify Runs before any resubmission');\n  return {...s, runId: run.id, datasetId: run.defaultDatasetId, deadline: now + 300000, terminal: false};\n}\nfunction inspect(s, response, now = Date.now()) {\n  const run = responseBody(response)?.data;\n  if (!run || run.id !== s.runId || run.defaultDatasetId !== s.datasetId) fail('RUN_IDENTITY_MISMATCH');\n  if (typeof run.status !== 'string') fail('MISSING_RUN_STATUS');\n  if (!TERMINAL.has(run.status) && now > s.deadline) fail('POLL_DEADLINE: inspect saved runId; no automatic resubmission');\n  if (!TERMINAL.has(run.status) && !['READY','RUNNING','TIMING-OUT','ABORTING'].includes(run.status)) fail('UNKNOWN_RUN_STATUS');\n  return {...s, runStatus: run.status, terminal: TERMINAL.has(run.status)};\n}\nfunction reconcile(s, response) {\n  if (!s.terminal) fail('NONTERMINAL_DATASET_READ');\n  const rows = responseBody(response);\n  if (!Array.isArray(rows)) fail('DATASET_NOT_ARRAY');\n  const expected = new Set(s.input.items.map(x => x.id));\n  const byId = new Map();\n  const anomalies = [];\n  for (const row of rows) {\n    if (!row || !expected.has(row.id)) { anomalies.push('UNEXPECTED_OUTPUT_ID'); continue; }\n    if (byId.has(row.id)) { anomalies.push('DUPLICATE_OUTPUT_ID'); continue; }\n    byId.set(row.id, row);\n  }\n  const results = s.input.items.map(item => {\n    const row = byId.get(item.id);\n    if (!row) return {id: item.id, status: 'MISSING_OUTPUT', needsReview: true, semanticCorrectnessVerified: false, runId: s.runId};\n    // Keep the Actor's output. Structure validation is not semantic verification or payment evidence.\n    return {...row, id: item.id, runId: s.runId, semanticCorrectnessVerified: false};\n  });\n  const complete = s.runStatus === 'SUCCEEDED' && !anomalies.length && results.every(r => r.status === 'STRUCTURE_VALIDATED');\n  const report = {batchIndex: s.batchIndex, runId: s.runId, datasetId: s.datasetId,\n    runStatus: s.runStatus, complete, anomalies, results};\n  const reports = [...s.reports, report];\n  const batchIndex = s.batchIndex + 1;\n  const canContinue = complete && batchIndex < s.chunks.length;\n  return {...s, reports, batchIndex, canContinue,\n    input: canContinue ? {items: s.chunks[batchIndex], labels: s.labels, fields: s.fields, includeSourceText: false} : null};\n}\nfunction finish(s) {\n  const returned = s.reports.flatMap(r => r.results);\n  const notSubmitted = s.chunks.slice(s.batchIndex).flat().map(r => ({id: r.id, status: 'NOT_SUBMITTED_AFTER_STOP', needsReview: true, semanticCorrectnessVerified: false}));\n  const results = [...returned, ...notSubmitted];\n  return {status: s.reports.every(r => r.complete) && !notSubmitted.length ? 'COMPLETED_STRUCTURE_CHECK_ONLY' : 'STOPPED_REVIEW_REQUIRED',\n    submittedRuns: s.reports.length, inputRecords: s.chunks.flat().length,\n    structureValidated: results.filter(r => r.status === 'STRUCTURE_VALIDATED').length,\n    missing: results.filter(r => r.status === 'MISSING_OUTPUT').length,\n    notSubmitted: notSubmitted.length,\n    paidResults: null, semanticAccuracy: null, actualChargeUsd: null,\n    runCapSumUsd: s.reports.length * s.perRunCapUsd,\n    runs: s.reports.map(({results, ...report}) => report), results};\n}\n\nreturn [{json:finish($input.first().json),pairedItem:{item:0}}];"
+      },
+      "position": [
+        2880,
+        400
+      ]
+    },
+    {
+      "id": "lanseq-16",
+      "name": "Read before enabling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "parameters": {
+        "width": 640,
+        "height": 280,
+        "content": "## Lanseq company classification\nDisabled by default. Configure your own Apify Header Auth on all three HTTP nodes. Read README, review build and budget, replace synthetic input, then enable executeModelCalls.\n\nOne run at a time, 20 records/run. Partial/failed batches stop further submission. POST transport errors require manual inspection of Apify Runs before retry.\n\nn8n 2.47.7 CLI import and execution tested against a local mock API. Live Apify/model end-to-end not verified by this template test. Structure validation is not accuracy, settlement or payment evidence."
+      },
+      "position": [
+        200,
+        -40
+      ]
+    }
+  ],
+  "connections": {
+    "Manual start": {
+      "main": [
+        [
+          {
+            "node": "Input and budget",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input and budget": {
+      "main": [
+        [
+          {
+            "node": "Validate and plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and plan": {
+      "main": [
+        [
+          {
+            "node": "Current batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Current batch": {
+      "main": [
+        [
+          {
+            "node": "Start Actor once",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Actor once": {
+      "main": [
+        [
+          {
+            "node": "Remember run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remember run": {
+      "main": [
+        [
+          {
+            "node": "Poll context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll context": {
+      "main": [
+        [
+          {
+            "node": "Read run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read run": {
+      "main": [
+        [
+          {
+            "node": "Inspect run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Inspect run": {
+      "main": [
+        [
+          {
+            "node": "Run terminal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run terminal": {
+      "main": [
+        [
+          {
+            "node": "Read results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 10 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 10 seconds": {
+      "main": [
+        [
+          {
+            "node": "Poll context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read results": {
+      "main": [
+        [
+          {
+            "node": "Reconcile batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile batch": {
+      "main": [
+        [
+          {
+            "node": "Continue batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue batches": {
+      "main": [
+        [
+          {
+            "node": "Current batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Final report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "tags": []
+}

@@ -1,0 +1,31 @@
+{
+  "n8nVersion": "2.47.7",
+  "scope": "CLI import and full workflow execution against localhost mock API only",
+  "liveApifyEndToEndVerified": false,
+  "cases": [
+    {
+      "case": "complete",
+      "passed": true,
+      "submittedMockRuns": 3,
+      "inputRecords": 41,
+      "outputRecords": 41,
+      "missing": 0,
+      "notSubmitted": 0,
+      "mockHttpRequests": 12,
+      "productionRequests": 0,
+      "modelCalls": 0
+    },
+    {
+      "case": "partial",
+      "passed": true,
+      "submittedMockRuns": 2,
+      "inputRecords": 41,
+      "outputRecords": 41,
+      "missing": 19,
+      "notSubmitted": 1,
+      "mockHttpRequests": 8,
+      "productionRequests": 0,
+      "modelCalls": 0
+    }
+  ]
+}
